@@ -1,0 +1,94 @@
+# CASIA2 Configuration for Copy-Move Forgery Detection
+data:
+  root: "./dataset/CASIA2"
+  train_dir: "train"
+  test_dir: "test"
+  raw_dir: "raw"
+  mask_dir: "mask"
+  # au_dir: "Au"
+  image_size: 320
+  crop_size: 320
+  center_crop_eval: false
+  return_paths: false
+  extensions: [".png", ".jpg", ".jpeg", ".bmp", ".tiff"]
+  batch_size: 4
+  num_workers: 4
+
+model:
+  encoder_out_ch: 256
+  gce_embed_dim: 256
+  gce_patch_size: 9
+  aspp_out_ch: 128
+  fuse_out_ch: 256
+  T_affine: 4
+  num_cls: 2
+  feat_h: 40  
+  feat_w: 40
+  encoder_variant: "b3"
+
+  gce:
+    alpha: 3.0
+    sigma: 4.0
+    gamma: 8.0
+    eps: 1e-8
+    stride: 2
+    m_channels: 64
+    T: 16
+    topk: 32
+    tau: 10.0
+
+  gor:
+    topk: 32
+    K_o: 32
+    tau: 3.0
+    eta: 6.0
+    lambda0: 0.2
+    alpha: 3.0
+    a: 1.0
+    b: 0.0
+    beta: 8.0
+    beta_prime: 8.0
+    smooth_ks: 5
+    smooth_sigma: 1.0
+    eps: 1e-6
+
+training:
+  model_dir: "./outputs/CASIA2/"
+  epochs: 100
+  batch_size: 4
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  warmup_epochs: 5
+  save_freq: 10
+  eval_freq: 5
+  print_freq: 100
+
+  optimization:
+    optimizer:
+      name: "AdamW"
+      lr: 0.0003
+      weight_decay: 0.0001
+      betas: [0.9, 0.999]
+
+    scheduler:
+      name: "CosineAnnealingLR"
+      T_max: 100
+      eta_min: 0.00001
+
+# Loss Configuration
+loss:
+  lambda_mask: 1.0
+  lambda_det: 0.5
+  lambda_gce: 0.5
+  lambda_dir: 0.3
+  lambda_cooc: 0.2
+  dice_weight: 0.5
+  nce_top_k: 5
+  nce_tau: 0.2
+  nce_min_dist_px: 2.0
+
+evaluation:
+  metrics: ["iou", "f1", "precision", "recall", "accuracy"]
+  save_images: true
+  save_high_res: false
+  threshold: 0.5 
