@@ -19,7 +19,7 @@ class ForgeryDataset(data.Dataset):
     def __init__(self, root: str, cfg: Dict, split: str = "train"):
         self.root = Path(root)
         self.cfg = cfg or {}
-        self.split = split
+        self.split = cfg["train_dir"] if split == "train" else cfg["test_dir"]
 
         # Handle new split structure: root/train/ or root/test/
         split_dir = self.root / split
