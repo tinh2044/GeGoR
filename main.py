@@ -14,7 +14,7 @@ from loguru import logger
 
 
 from optimizer import build_optimizer, build_scheduler
-from dataset import get_training_set, get_test_set
+from dataset import ForgeryDataset
 from net import CMFDNet
 from opt import train_one_epoch, evaluate_fn
 import utils
@@ -77,8 +77,8 @@ def main(args, cfg):
 
     # Create datasets
     cfg_data = cfg["data"]
-    train_data = get_training_set(cfg_data["root"], cfg_data)
-    test_data = get_test_set(cfg_data["root"], cfg_data)
+    train_data = ForgeryDataset(split="train", cfg=cfg_data)
+    test_data = ForgeryDataset(split="test", cfg=cfg_data)
 
     train_dataloader = DataLoader(
         train_data,
