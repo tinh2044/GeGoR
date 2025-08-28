@@ -205,7 +205,7 @@ def main(args, cfg):
             log_dir=f"{log_dir}/eval/test",
         )
         print(
-            f"Test loss of the network on the {len(test_dataloader)} test images: {test_results['psnr']:.3f} PSNR"
+            f"Test loss of the network on the {len(test_dataloader)} test images: {test_results['iou']:.3f} iou"
         )
         print(f"* TEST SSIM {test_results['ssim']:.3f}")
         return
@@ -215,7 +215,7 @@ def main(args, cfg):
         f"Start training for {args.epochs} epochs and start epoch: {args.start_epoch}"
     )
     start_time = time.time()
-    best_psnr = 0.0
+    best_iou = 0.0
 
     for epoch in range(args.start_epoch, args.epochs):
         train_results = train_one_epoch(
@@ -258,8 +258,8 @@ def main(args, cfg):
         )
 
         # Save best model
-        if test_results["psnr"] > best_psnr:
-            best_psnr = test_results["psnr"]
+        if test_results["iou"] > best_iou:
+            best_iou = test_results["iou"]
             checkpoint_paths = [output_dir / "best_checkpoint.pth"]
             for checkpoint_path in checkpoint_paths:
                 utils.save_on_master(
@@ -272,7 +272,7 @@ def main(args, cfg):
                     checkpoint_path,
                 )
 
-        print(f"* TEST PSNR {test_results['psnr']:.3f} Best PSNR {best_psnr:.3f}")
+        print(f"* TEST iou {test_results['iou']:.3f} Best iou {best_iou:.3f}")
 
         # Log results
         log_results = {
