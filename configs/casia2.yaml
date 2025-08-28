@@ -1,7 +1,7 @@
 # CASIA2 Configuration for Copy-Move Forgery Detection
 data:
   root: "./dataset/CASIA2"
-  train_dir: "train"
+  train_dir: "test"
   test_dir: "test"
   raw_dir: "raw"
   mask_dir: "mask"
