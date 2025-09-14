@@ -49,7 +49,7 @@ class ForgeryDataset(data.Dataset):
                 self.split_list = set(items)
 
         self.samples = self._build_samples()
-        self.samples = random.shuffle(self.samples)
+        random.shuffle(self.samples)
 
         print(f"ForgeryDataset[{self.split}] -> {len(self.samples)} samples")
         if self.base_dir != self.root:
