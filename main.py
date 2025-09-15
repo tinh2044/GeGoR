@@ -58,6 +58,7 @@ def get_args_parser():
     )
 
     parser.add_argument("--print_freq", default=1, type=int, help="print frequency")
+    parser.add_argument("--save_all", action="store_true", help="save all images")
 
     return parser
 

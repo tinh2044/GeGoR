@@ -411,64 +411,69 @@ def save_sample_images(inputs, pred_masks, targets, batch_idx, epoch, output_dir
     plt.close()
 
 
-def save_eval_images(inputs, pred_masks, targets, filenames, epoch, output_dir):
+def save_eval_images(
+    inputs, pred_masks, targets, filenames, epoch, output_dir, save_all
+):
     """Save evaluation images with metrics"""
     eval_dir = Path(output_dir) / "evaluation" / f"epoch_{epoch}"
     eval_dir.mkdir(parents=True, exist_ok=True)
 
-    i = np.random.randint(0, len(inputs))
+    if save_all:
+        index = range(len(inputs))
+    else:
+        index = [np.random.randint(0, len(inputs))]
+    for i in index:
+        input_img = inputs[i].cpu()
+        target_mask = targets[i].cpu()
+        pred_mask = pred_masks[i].cpu()
+        filename = filenames[i]
 
-    input_img = inputs[i].cpu()
-    target_mask = targets[i].cpu()
-    pred_mask = pred_masks[i].cpu()
-    filename = filenames[i]
+        # Calculate metrics for this sample
+        pred_binary = (pred_mask > 0.5).float()
+        target_binary = (target_mask > 0.5).float()
 
-    # Calculate metrics for this sample
-    pred_binary = (pred_mask > 0.5).float()
-    target_binary = (target_mask > 0.5).float()
+        intersection = (pred_binary * target_binary).sum()
+        union = pred_binary.sum() + target_binary.sum() - intersection
+        iou = (intersection / (union + 1e-8)).item()
 
-    intersection = (pred_binary * target_binary).sum()
-    union = pred_binary.sum() + target_binary.sum() - intersection
-    iou = (intersection / (union + 1e-8)).item()
+        # Create visualization
+        fig, axes = plt.subplots(1, 4, figsize=(20, 5))
 
-    # Create visualization
-    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+        # Input image
+        input_np = input_img.permute(1, 2, 0).numpy()
+        input_np = (input_np - input_np.min()) / (input_np.max() - input_np.min())
+        axes[0].imshow(input_np)
+        axes[0].set_title("Input Image")
+        axes[0].axis("off")
 
-    # Input image
-    input_np = input_img.permute(1, 2, 0).numpy()
-    input_np = (input_np - input_np.min()) / (input_np.max() - input_np.min())
-    axes[0].imshow(input_np)
-    axes[0].set_title("Input Image")
-    axes[0].axis("off")
+        # Ground truth mask
+        target_np = target_mask.squeeze().numpy()
+        axes[1].imshow(target_np, cmap="gray")
+        axes[1].set_title("Ground Truth")
+        axes[1].axis("off")
 
-    # Ground truth mask
-    target_np = target_mask.squeeze().numpy()
-    axes[1].imshow(target_np, cmap="gray")
-    axes[1].set_title("Ground Truth")
-    axes[1].axis("off")
+        # Predicted mask
+        pred_np = pred_mask.squeeze().numpy()
+        axes[2].imshow(pred_np, cmap="gray")
+        axes[2].set_title("Prediction")
+        axes[2].axis("off")
 
-    # Predicted mask
-    pred_np = pred_mask.squeeze().numpy()
-    axes[2].imshow(pred_np, cmap="gray")
-    axes[2].set_title("Prediction")
-    axes[2].axis("off")
+        # Overlay
+        overlay = input_np.copy()
+        overlay[target_np > 0.5] = [1, 0, 0]  # Red for ground truth
+        overlay[pred_np > 0.5] = [0, 1, 0]  # Green for prediction
+        axes[3].imshow(overlay)
+        axes[3].set_title(f"Overlay (IoU: {iou:.3f})")
+        axes[3].axis("off")
 
-    # Overlay
-    overlay = input_np.copy()
-    overlay[target_np > 0.5] = [1, 0, 0]  # Red for ground truth
-    overlay[pred_np > 0.5] = [0, 1, 0]  # Green for prediction
-    axes[3].imshow(overlay)
-    axes[3].set_title(f"Overlay (IoU: {iou:.3f})")
-    axes[3].axis("off")
-
-    plt.suptitle(f"File: {filename}", fontsize=12)
-    plt.tight_layout()
-    plt.savefig(
-        eval_dir / f"eval_{i}_{Path(filename).stem}.png",
-        bbox_inches="tight",
-        dpi=150,
-    )
-    plt.close()
+        plt.suptitle(f"File: {filename}", fontsize=12)
+        plt.tight_layout()
+        plt.savefig(
+            eval_dir / f"eval_{i}_{Path(filename).stem}.png",
+            bbox_inches="tight",
+            dpi=150,
+        )
+        plt.close()
 
 
 def _to_numpy_image(t: torch.Tensor) -> np.ndarray:

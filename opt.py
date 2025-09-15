@@ -95,7 +95,13 @@ def evaluate_fn(
             if hasattr(args, "output_dir"):
                 if hasattr(args, "save_images") and args.save_images:
                     save_eval_images(
-                        inputs, pred_masks, targets, filenames, epoch, args.output_dir
+                        inputs,
+                        pred_masks,
+                        targets,
+                        filenames,
+                        epoch,
+                        args.output_dir,
+                        args.save_all,
                     )
 
     metric_logger.synchronize_between_processes()

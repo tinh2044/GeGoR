@@ -87,7 +87,6 @@ loss:
   nce_min_dist_px: 2.0
 
 evaluation:
-  metrics: ["iou", "f1", "precision", "recall", "accuracy"]
   save_images: true
   save_high_res: false
   threshold: 0.5 
