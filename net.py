@@ -6,6 +6,52 @@ from gce import GCE
 from gor import GOR
 
 
+def _binary_dice_score(
+    pred: torch.Tensor, target: torch.Tensor, smooth: float = 1.0
+) -> torch.Tensor:
+    """Soft Dice score for binary maps in [0,1].
+
+    pred/target: (B,1,H,W)
+    returns scalar tensor
+    """
+    pred = pred.contiguous().view(pred.size(0), -1)
+    target = target.contiguous().view(target.size(0), -1)
+    intersection = (pred * target).sum(dim=1)
+    denom = pred.sum(dim=1) + target.sum(dim=1)
+    dice = (2.0 * intersection + smooth) / (denom + smooth)
+    return dice.mean()
+
+
+def _soft_iou_loss(
+    pred: torch.Tensor, target: torch.Tensor, smooth: float = 1.0
+) -> torch.Tensor:
+    """Soft IoU (Jaccard) loss for binary maps in [0,1]."""
+    pred = pred.contiguous().view(pred.size(0), -1)
+    target = target.contiguous().view(target.size(0), -1)
+    intersection = (pred * target).sum(dim=1)
+    union = pred.sum(dim=1) + target.sum(dim=1) - intersection
+    iou = (intersection + smooth) / (union + smooth)
+    return (1.0 - iou).mean()
+
+
+def _focal_tversky_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    alpha: float = 0.7,
+    beta: float = 0.3,
+    gamma: float = 0.75,
+    smooth: float = 1.0,
+) -> torch.Tensor:
+    """Focal Tversky Loss (emphasizes recall for minority class when alpha>beta)."""
+    pred = pred.contiguous().view(pred.size(0), -1)
+    target = target.contiguous().view(target.size(0), -1)
+    tp = (pred * target).sum(dim=1)
+    fp = (pred * (1.0 - target)).sum(dim=1)
+    fn = ((1.0 - pred) * target).sum(dim=1)
+    tversky = (tp + smooth) / (tp + alpha * fn + beta * fp + smooth)
+    return (1.0 - tversky).pow(gamma).mean()
+
+
 class ExtractorEfficientNet(nn.Module):
     def __init__(
         self,
@@ -231,6 +277,19 @@ class CMFDNet(nn.Module):
         self.loc_head = LocalizationHead(in_ch=fuse_out_ch, mid_ch=128, out_ch=num_cls)
         self.T_affine = int(T_affine)
 
+        # Loss configuration (optional; focuses more on positive/manipulated class)
+        loss_cfg = (
+            kwargs.get("loss", {}) if isinstance(kwargs.get("loss", {}), dict) else {}
+        )
+        self.loss_pos_weight = float(loss_cfg.get("pos_weight", 5.0))  # static fallback
+        self.loss_dynamic_pos_weight = bool(loss_cfg.get("dynamic_pos_weight", True))
+        self.loss_lambda_dice = float(loss_cfg.get("lambda_dice", 1.0))
+        self.loss_lambda_iou = float(loss_cfg.get("lambda_iou", 0.0))
+        self.loss_lambda_ft = float(loss_cfg.get("lambda_focal_tversky", 0.0))
+        self.tversky_alpha = float(loss_cfg.get("tversky_alpha", 0.7))
+        self.tversky_beta = float(loss_cfg.get("tversky_beta", 0.3))
+        self.tversky_gamma = float(loss_cfg.get("tversky_gamma", 0.75))
+
     def forward(self, x: torch.Tensor, gt_mask: torch.Tensor = None) -> dict:
         B, _, H, W = x.shape
         device = x.device
@@ -290,8 +349,39 @@ class CMFDNet(nn.Module):
 
         loss_dict = {}
         if gt_mask is not None:
-            loss_dict["bce"] = F.cross_entropy(mask_logits, gt_mask.squeeze(1).long())
-            loss_dict["total"] = loss_dict["bce"]
+            # Weighted CE (class 1 emphasized). Optionally compute dynamic pos weight by class frequency.
+            with torch.no_grad():
+                if self.loss_dynamic_pos_weight:
+                    total = float(gt_mask.numel())
+                    pos = float(gt_mask.sum().item())
+                    neg = max(total - pos, 0.0)
+                    # Avoid extreme explosion; clamp in [1, 20]
+                    w1 = 1.0 if pos <= 0.0 else max(1.0, min(neg / (pos + 1e-6), 20.0))
+                else:
+                    w1 = self.loss_pos_weight
+            weight = torch.tensor([1.0, w1], device=device, dtype=torch.float32)
+            ce = F.cross_entropy(mask_logits, gt_mask.squeeze(1).long(), weight=weight)
+
+            # Auxiliary region-overlap losses on positive channel probability
+            p_pos = mask_probs[:, 1:2]
+            t_pos = gt_mask.float()
+
+            dice_loss = 1.0 - _binary_dice_score(p_pos, t_pos)
+            iou_loss = _soft_iou_loss(p_pos, t_pos)
+            ft_loss = _focal_tversky_loss(
+                p_pos, t_pos, self.tversky_alpha, self.tversky_beta, self.tversky_gamma
+            )
+
+            total_loss = ce
+            total_loss = total_loss + self.loss_lambda_dice * dice_loss
+            total_loss = total_loss + self.loss_lambda_iou * iou_loss
+            total_loss = total_loss + self.loss_lambda_ft * ft_loss
+
+            loss_dict["ce"] = ce
+            loss_dict["dice"] = dice_loss
+            loss_dict["iou"] = iou_loss
+            loss_dict["focal_tversky"] = ft_loss
+            loss_dict["total"] = total_loss
 
         return {
             **{f"GCE_{k}": v for k, v in gce_out.items()},
