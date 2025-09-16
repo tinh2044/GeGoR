@@ -59,6 +59,9 @@ def get_args_parser():
 
     parser.add_argument("--print_freq", default=1, type=int, help="print frequency")
     parser.add_argument("--save_all", action="store_true", help="save all images")
+    parser.add_argument(
+        "--eval_train", action="store_true", help="Evaluate in training"
+    )
 
     return parser
 
@@ -277,6 +280,7 @@ def main(args, cfg):
             epoch,
             print_freq=args.print_freq,
             log_file=log_file,
+            eval_train=args.eval_train,
         )
         scheduler.step()
 
@@ -302,15 +306,17 @@ def main(args, cfg):
         if rank == 0:
             print()
 
-        # Evaluate
-        test_results = evaluate_fn(
-            args,
-            test_dataloader,
-            model,
-            epoch,
-            print_freq=args.print_freq,
-            log_file=log_file,
-        )
+        if not args.eval_train:
+            test_results = evaluate_fn(
+                args,
+                test_dataloader,
+                model,
+                epoch,
+                print_freq=args.print_freq,
+                log_file=log_file,
+            )
+        else:
+            test_results = train_results
 
         if test_results["iou"] > best_iou:
             best_iou = test_results["iou"]

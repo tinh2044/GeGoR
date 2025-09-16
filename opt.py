@@ -5,7 +5,14 @@ from logger import MetricLogger, SmoothedValue
 
 
 def train_one_epoch(
-    args, model, data_loader, optimizer, epoch, print_freq=10, log_file=""
+    args,
+    model,
+    data_loader,
+    optimizer,
+    epoch,
+    print_freq=10,
+    log_file="",
+    eval_train=False,
 ):
     """Train for one epoch - forgery detection"""
     model.train()
@@ -39,7 +46,12 @@ def train_one_epoch(
         for k, v in loss_dict.items():
             metric_logger.update(**{f"{k}_loss": v.item()})
 
-        # Save sample images
+        if eval_train:
+            metrics = compute_metrics(pred_masks, targets, threshold=0.5)
+
+            for metric_name, metric_value in metrics.items():
+                metric_logger.update(**{f"{metric_name}": metric_value})
+
         if batch_idx % (print_freq * 5) == 0 and hasattr(args, "output_dir"):
             save_sample_images(
                 inputs, pred_masks, targets, batch_idx, epoch, args.output_dir
