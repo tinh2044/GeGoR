@@ -64,14 +64,14 @@ class ForgeryDataset(data.Dataset):
         if self.raw_dir.exists() and self.mask_dir.exists():
             raw_index: Dict[str, List[Path]] = {}
             for p in os.listdir(self.raw_dir):
-                base = normalize_basename(p.name)
+                base = normalize_basename(p)
                 if self.split_list and base not in self.split_list:
                     continue
                 raw_index.setdefault(base, []).append(p)
 
             mask_index: Dict[str, List[Path]] = {}
             for p in os.listdir(self.mask_dir):
-                base = normalize_basename(p.name)
+                base = normalize_basename(p)
                 if self.split_list and base not in self.split_list:
                     continue
                 mask_index.setdefault(base, []).append(p)
