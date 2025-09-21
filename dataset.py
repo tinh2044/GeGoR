@@ -5,7 +5,7 @@ from PIL import Image
 import random
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-import os
+
 
 def normalize_basename(filename: str) -> str:
     stem = Path(filename).stem
@@ -51,27 +51,35 @@ class ForgeryDataset(data.Dataset):
         self.samples = self._build_samples()
         random.shuffle(self.samples)
 
-        # print(f"ForgeryDataset[{self.split}] -> {len(self.samples)} samples")
+        print(f"ForgeryDataset[{self.split}] -> {len(self.samples)} samples")
         # if self.base_dir != self.root:
         #     print(f"  Base dir: {self.base_dir}")
-        # print(f"  Raw: {self.raw_dir} ({len(os.listdir(self.raw_dir))} files)")
-        # print(f"  Mask: {self.mask_dir} ({len(os.listdir(self.mask_dir))} files)")
+        # print(f"  Raw: {self.raw_dir} ({len(self._list_files(self.raw_dir))} files)")
+        # print(f"  Mask: {self.mask_dir} ({len(self._list_files(self.mask_dir))} files)")
 
+    def _list_files(self, folder: Path) -> List[Path]:
+        if not folder.exists():
+            return []
+        files = []
+        for fp in folder.rglob("*"):
+            if fp.is_file() and fp.suffix.lower() in self.extensions:
+                files.append(fp)
+        return files
 
     def _build_samples(self) -> List[Tuple[Path, Optional[Path]]]:
         samples: List[Tuple[Path, Optional[Path]]] = []
 
         if self.raw_dir.exists() and self.mask_dir.exists():
             raw_index: Dict[str, List[Path]] = {}
-            for p in os.listdir(self.raw_dir):
-                base = normalize_basename(p)
+            for p in self._list_files(self.raw_dir):
+                base = normalize_basename(p.name)
                 if self.split_list and base not in self.split_list:
                     continue
                 raw_index.setdefault(base, []).append(p)
 
             mask_index: Dict[str, List[Path]] = {}
-            for p in os.listdir(self.mask_dir):
-                base = normalize_basename(p)
+            for p in self._list_files(self.mask_dir):
+                base = normalize_basename(p.name)
                 if self.split_list and base not in self.split_list:
                     continue
                 mask_index.setdefault(base, []).append(p)

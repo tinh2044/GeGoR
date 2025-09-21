@@ -89,7 +89,7 @@ def save_sample_images(inputs, pred_masks, targets, batch_idx, epoch, output_dir
 
 
 def save_eval_images(
-    inputs, pred_masks, targets, filenames, epoch, output_dir, save_all
+    inputs, pred_masks, targets, filenames, epoch, output_dir, save_all, origs=None
 ):
     """Save evaluation images with metrics"""
     eval_dir = Path(output_dir) / "evaluation" / f"epoch_{epoch}"
@@ -103,6 +103,7 @@ def save_eval_images(
         input_img = inputs[i].cpu()
         target_mask = targets[i].cpu()
         pred_mask = pred_masks[i].cpu()
+        orig_img = origs[i].cpu()
         filename = filenames[i]
 
         # Calculate metrics for this sample
@@ -113,35 +114,46 @@ def save_eval_images(
         union = pred_binary.sum() + target_binary.sum() - intersection
         iou = (intersection / (union + 1e-8)).item()
 
-        # Create visualization
-        fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+        if origs is not None:
+            j = 1
+        else:
+            j = 0
 
-        # Input image
+        fig, axes = plt.subplots(1, 4 + j, figsize=(20, 5))
+
+        if origs is not None:
+            # Original image
+            orig_np = orig_img.permute(1, 2, 0).numpy()
+            orig_np = (orig_np - orig_np.min()) / (orig_np.max() - orig_np.min())
+            axes[0].imshow(orig_np)
+            axes[0].set_title("Original Image")
+            axes[0].axis("off")
+
         input_np = input_img.permute(1, 2, 0).numpy()
         input_np = (input_np - input_np.min()) / (input_np.max() - input_np.min())
-        axes[0].imshow(input_np)
-        axes[0].set_title("Input Image")
-        axes[0].axis("off")
+        axes[0 + j].imshow(input_np)
+        axes[0 + j].set_title("Input Image")
+        axes[0 + j].axis("off")
 
         # Ground truth mask
         target_np = target_mask.squeeze().numpy()
-        axes[1].imshow(target_np, cmap="gray")
-        axes[1].set_title("Ground Truth")
-        axes[1].axis("off")
+        axes[1 + j].imshow(target_np, cmap="gray")
+        axes[1 + j].set_title("Ground Truth")
+        axes[1 + j].axis("off")
 
         # Predicted mask
         pred_np = pred_mask.squeeze().numpy()
-        axes[2].imshow(pred_np, cmap="gray")
-        axes[2].set_title("Prediction")
-        axes[2].axis("off")
+        axes[2 + j].imshow(pred_np, cmap="gray")
+        axes[2 + j].set_title("Prediction")
+        axes[2 + j].axis("off")
 
         # Overlay
         overlay = input_np.copy()
         overlay[target_np > 0.5] = [1, 0, 0]  # Red for ground truth
         overlay[pred_np > 0.5] = [0, 1, 0]  # Green for prediction
-        axes[3].imshow(overlay)
-        axes[3].set_title(f"Overlay (IoU: {iou:.3f})")
-        axes[3].axis("off")
+        axes[3 + j].imshow(overlay)
+        axes[3 + j].set_title(f"Overlay (IoU: {iou:.3f})")
+        axes[3 + j].axis("off")
 
         plt.suptitle(f"File: {filename}", fontsize=12)
         plt.tight_layout()
