@@ -6,6 +6,16 @@ import os
 from pathlib import Path
 from fvcore.nn import FlopCountAnalysis
 
+from skimage import exposure
+from scipy import ndimage
+
+try:
+    from tqdm import tqdm
+
+    _HAS_TQDM = True
+except Exception:
+    _HAS_TQDM = False
+
 
 def save_img(tensor, path, normalize=True):
     """Save tensor as image file"""
@@ -171,10 +181,9 @@ def _to_numpy_image(t: torch.Tensor) -> np.ndarray:
     if isinstance(t, torch.Tensor):
         t = t.detach().cpu()
     arr = t.numpy()
-    if arr.ndim == 3:  # C,H,W
+    if arr.ndim == 3:
         if arr.shape[0] == 3:
             arr = arr.transpose(1, 2, 0)
-            # Min-max normalize per image
             mn, mx = arr.min(), arr.max()
             if mx > mn:
                 arr = (arr - mn) / (mx - mn)
@@ -184,16 +193,466 @@ def _to_numpy_image(t: torch.Tensor) -> np.ndarray:
             if mx > mn:
                 arr = (arr - mn) / (mx - mn)
         else:
-            # For multi-channel non-RGB, reduce with min-max on each channel when saved per-channel
             mn, mx = arr.min(), arr.max()
             if mx > mn:
                 arr = (arr - mn) / (mx - mn)
-            # Keep as (C,H,W); caller may slice per channel
     elif arr.ndim == 2:
         mn, mx = arr.min(), arr.max()
         if mx > mn:
             arr = (arr - mn) / (mx - mn)
     return arr
+
+
+def _quantize_array(arr: np.ndarray, levels: int = 256) -> np.ndarray:
+    """Quantize array to discrete levels for pixelated effect.
+
+    Args:
+        arr: Input array in [0,1] range
+        levels: Number of quantization levels
+
+    Returns:
+        Quantized array with discrete values
+    """
+    # Scale to desired levels and round to nearest integer
+    quantized = np.round(arr * (levels - 1))
+    # Normalize back to [0,1]
+    quantized = quantized / (levels - 1)
+    return quantized
+
+
+def _pixelate_array(arr: np.ndarray, pixel_size: int = 4) -> np.ndarray:
+    """Create pixelated effect by downsampling and upsampling.
+
+    Args:
+        arr: Input array in [0,1] range
+        pixel_size: Size of each pixel block
+
+    Returns:
+        Pixelated array
+    """
+    if pixel_size <= 1:
+        return arr
+
+    # Get original shape
+    H, W = arr.shape[:2]
+
+    # Downsample by taking mean of blocks
+    H_new = H // pixel_size
+    W_new = W // pixel_size
+
+    # Create downsampled version
+    downsampled = np.zeros((H_new, W_new))
+    for i in range(H_new):
+        for j in range(W_new):
+            block = arr[
+                i * pixel_size : (i + 1) * pixel_size,
+                j * pixel_size : (j + 1) * pixel_size,
+            ]
+            downsampled[i, j] = np.mean(block)
+
+    # Upsample by repeating values
+    pixelated = np.repeat(
+        np.repeat(downsampled, pixel_size, axis=0), pixel_size, axis=1
+    )
+
+    # Crop to original size if needed
+    return pixelated[:H, :W]
+
+
+def _save_pixelated_image(
+    arr: np.ndarray,
+    path: str,
+    pixel_style: str = "sharp",
+    pixel_size: int = 4,
+    quantize_levels: int = 64,
+    dpi: int = 100,
+):
+    """Save array as pixelated image for better feature visualization.
+
+    Args:
+        arr: Array in [0,1] range
+        path: Output path
+        pixel_style: 'sharp', 'quantized', 'pixelated', 'smooth'
+        pixel_size: Size for pixelation effect
+        quantize_levels: Number of levels for quantization
+        dpi: DPI for image quality
+    """
+    # Prepare array based on style
+    if pixel_style == "quantized":
+        arr = _quantize_array(arr, quantize_levels)
+    elif pixel_style == "pixelated":
+        arr = _pixelate_array(arr, pixel_size)
+    elif pixel_style == "both":
+        arr = _quantize_array(arr, quantize_levels)
+        arr = _pixelate_array(arr, pixel_size)
+
+    # Create figure with exact pixel dimensions
+    fig, ax = plt.subplots(figsize=(arr.shape[1] / dpi, arr.shape[0] / dpi), dpi=dpi)
+
+    # Turn off axes
+    ax.axis("off")
+
+    # Display with nearest neighbor interpolation
+    if arr.ndim == 2:
+        im = ax.imshow(arr, cmap="gray", interpolation="nearest")
+    else:
+        im = ax.imshow(arr, interpolation="nearest")
+
+    # Remove margins
+    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+
+    # Save with high quality
+    plt.savefig(path, dpi=dpi, bbox_inches="tight", pad_inches=0)
+    plt.close()
+
+
+def _resize_feature_map(feat: np.ndarray, target_shape: tuple) -> np.ndarray:
+    """Resize feature map to target shape using scipy.
+
+    Args:
+        feat: Feature map array (H, W) or (C, H, W)
+        target_shape: Target shape (H, W)
+
+    Returns:
+        Resized feature map
+    """
+    if feat.ndim == 2:
+        # Single channel
+        return ndimage.zoom(
+            feat,
+            (target_shape[0] / feat.shape[0], target_shape[1] / feat.shape[1]),
+            order=1,
+        )
+    elif feat.ndim == 3:
+        # Multi-channel
+        resized_channels = []
+        for c in range(feat.shape[0]):
+            resized = ndimage.zoom(
+                feat[c],
+                (target_shape[0] / feat.shape[1], target_shape[1] / feat.shape[2]),
+                order=1,
+            )
+            resized_channels.append(resized)
+        return np.stack(resized_channels, axis=0)
+    else:
+        return feat
+
+
+def _save_enhanced_pixelated_image(
+    arr: np.ndarray,
+    path: str,
+    enhancement: str = "clahe",
+    colormap: str = "jet",
+    pixel_style: str = "sharp",
+    pixel_size: int = 1,
+):
+    """Save enhanced and pixelated feature map.
+
+    Args:
+        arr: Array in [0,1] range
+        path: Output path
+        enhancement: Enhancement method
+        colormap: Color map
+        pixel_style: Pixelation style
+        pixel_size: Pixel size
+    """
+    # Apply enhancement
+    enhanced = _enhance_feature_map(arr, enhancement)
+
+    # Apply pixelation
+    if pixel_style == "quantized":
+        enhanced = _quantize_array(enhanced, 64)
+    elif pixel_style == "pixelated":
+        enhanced = _pixelate_array(enhanced, pixel_size)
+    elif pixel_style == "both":
+        enhanced = _quantize_array(enhanced, 64)
+        enhanced = _pixelate_array(enhanced, pixel_size)
+
+    # Apply colormap
+    if enhanced.ndim == 2:
+        colored = _apply_colormap(enhanced, colormap)
+    else:
+        colored = enhanced
+
+    # Save with nearest neighbor interpolation
+    fig, ax = plt.subplots(
+        figsize=(colored.shape[1] / 100, colored.shape[0] / 100), dpi=100
+    )
+    ax.axis("off")
+
+    im = ax.imshow(colored, interpolation="nearest")
+    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    plt.savefig(path, dpi=100, bbox_inches="tight", pad_inches=0)
+    plt.close()
+
+
+def _slice_tensor_to_image(t: torch.Tensor, b: int) -> list:
+    """Slice a tensor at batch index b and convert to image-like numpy arrays.
+
+    Returns a list of (suffix, np.ndarray) where suffix is appended to filename.
+    Supported shapes after slicing to one sample:
+      - (C,H,W) with C in {1,3} → single image
+      - (C,H,W) with C>3       → per-channel images with suffix _chXXX
+      - (H,W,2)                → magnitude map with suffix _mag
+      - (H,W)                  → single image
+      - (1,H,W)                → squeeze to (H,W)
+    Other shapes are ignored as non image-like.
+    """
+    out: list[tuple[str, np.ndarray]] = []
+    if not isinstance(t, torch.Tensor):
+        return out
+    try:
+        x = t
+        if x.dim() >= 1 and x.size(0) > b:
+            # Slice batch dim if present
+            if x.dim() >= 4:  # assume (B, ...)
+                x = x[b].detach().cpu()
+            elif x.dim() == 3 and x.size(0) == b:
+                x = x.detach().cpu()
+        else:
+            x = x.detach().cpu()
+
+        # Now interpret x
+        if x.dim() == 3 and x.size(0) in (1, 3):  # (C,H,W)
+            out.append(("", _to_numpy_image(x)))
+        elif x.dim() == 3 and x.size(-1) == 2:  # (H,W,2)
+            arr = x.numpy()
+            mag = np.sqrt(arr[..., 0] ** 2 + arr[..., 1] ** 2)
+            mn, mx = mag.min(), mag.max()
+            if mx > mn:
+                mag = (mag - mn) / (mx - mn)
+            out.append(("_mag", mag))
+        elif x.dim() == 3:  # (C,H,W) with C>3 – per-channel
+            C = x.size(0)
+            for c in range(C):
+                out.append((f"_ch{c:03d}", _to_numpy_image(x[c : c + 1])))
+        elif x.dim() == 2:  # (H,W)
+            out.append(("", _to_numpy_image(x)))
+        elif x.dim() == 3 and x.size(0) == 1:  # (1,H,W)
+            out.append(("", _to_numpy_image(x[0])))
+    except Exception:
+        pass
+    return out
+
+
+def _enhance_feature_map(arr: np.ndarray, method: str = "clahe") -> np.ndarray:
+    """Enhance feature map for better visualization using various methods.
+
+    Args:
+        arr: numpy array in [0,1] range
+        method: enhancement method ('clahe', 'histogram', 'gamma', 'none')
+    """
+
+    if method == "clahe":
+        enhanced = exposure.equalize_adapthist(arr, clip_limit=0.03)
+        return enhanced
+
+    if method == "histogram":
+        enhanced = exposure.equalize_hist(arr)
+        return enhanced
+
+    if method == "gamma":
+        gamma = 0.5  # Darken to show more details
+        enhanced = np.power(arr, gamma)
+        return enhanced
+
+    return arr
+
+
+def _apply_colormap(arr: np.ndarray, colormap: str = "viridis") -> np.ndarray:
+    """Apply a colormap to convert grayscale to color image.
+
+    Args:
+        arr: numpy array in [0,1] range (H,W)
+        colormap: matplotlib colormap name
+    Returns:
+        RGB image array (H,W,3) in [0,1] range
+    """
+    try:
+        import matplotlib.pyplot as plt
+
+        cmap = plt.get_cmap(colormap)
+
+        colored = cmap(arr)
+
+        if colored.shape[-1] == 4:
+            colored = colored[..., :3]
+
+        return colored
+    except Exception:
+        return np.stack([arr, arr, arr], axis=-1)
+
+
+def _feature_to_color_image(
+    feat: torch.Tensor, enhancement: str = "clahe", colormap: str = "jet"
+) -> np.ndarray:
+    """Convert a feature tensor to enhanced color RGB image.
+
+    Args:
+        feat: feature tensor (C,H,W) or (H,W), should be single channel
+        enhancement: enhancement method for contrast
+        colormap: color map to use
+    Returns:
+        RGB numpy array in [0,1] range
+    """
+    arr = _to_numpy_image(feat)
+
+    if arr.ndim == 3:
+        if arr.shape[0] == 1:
+            arr = arr[0]
+        else:
+            arr = arr.mean(axis=0)
+
+    arr = _enhance_feature_map(arr, enhancement)
+
+    colored = _apply_colormap(arr, colormap)
+
+    return colored
+
+
+def _save_feature_visualization(
+    feat_dir: Path,
+    feat_name: str,
+    feat_tensor: torch.Tensor,
+    target_shape: tuple = None,
+    enhancement: str = "clahe",
+    colormap: str = "jet",
+    pixel_style: str = "pixelated",
+    pixel_size: int = 4,
+):
+    """Save enhanced and pixelated feature visualization.
+
+    Args:
+        feat_dir: directory to save feature files
+        feat_name: name of the feature
+        feat_tensor: feature tensor (C,H,W) or (H,W)
+        target_shape: target shape (H, W) to resize to, if None no resize
+        enhancement: enhancement method ('clahe', 'histogram', 'gamma', 'none')
+        colormap: color map to use
+        pixel_style: pixelation style ('sharp', 'quantized', 'pixelated', 'both')
+        pixel_size: size for pixelation effect
+    """
+    feat_dir.mkdir(parents=True, exist_ok=True)
+
+    if feat_tensor.ndim == 3 and feat_tensor.size(0) == 1:
+        # Single channel feature
+        arr = _to_numpy_image(feat_tensor[0])
+
+        # Resize if target_shape provided
+        if target_shape is not None:
+            arr = _resize_feature_map(arr, target_shape)
+
+        # Save pixelated version
+        _save_enhanced_pixelated_image(
+            arr,
+            str(feat_dir / f"{feat_name}.png"),
+            enhancement=enhancement,
+            colormap=colormap,
+            pixel_style=pixel_style,
+            pixel_size=pixel_size,
+        )
+
+    elif feat_tensor.ndim == 3 and feat_tensor.size(0) > 1:
+        # Multi-channel feature
+        C, H, W = feat_tensor.shape
+
+        for c in range(C):
+            ch_tensor = feat_tensor[c : c + 1]
+
+            # Create channel directory
+            ch_name = "ch_%03d" % c
+
+            # Get array for this channel
+            arr = _to_numpy_image(ch_tensor[0])
+
+            # Resize if target_shape provided
+            if target_shape is not None:
+                arr = _resize_feature_map(arr, target_shape)
+
+            # Save pixelated version
+            _save_enhanced_pixelated_image(
+                arr,
+                str(feat_dir / ("%s.png" % ch_name)),
+                enhancement=enhancement,
+                colormap=colormap,
+                pixel_style=pixel_style,
+                pixel_size=pixel_size,
+            )
+
+
+def recursion_save_feature(
+    out_dir: Path,
+    outputs,
+    batch_index: int,
+    target_shape=None,
+    enhancement: str = "clahe",
+    colormap: str = "jet",
+    pixel_style: str = "pixelated",
+    pixel_size: int = 4,
+    log: callable = print,
+    pbar=None,
+):
+    saved = 0
+    for key, val in outputs.items():
+        subdir = out_dir / key
+        if isinstance(val, dict):
+            saved += recursion_save_feature(
+                subdir,
+                val,
+                batch_index=batch_index,
+                target_shape=target_shape,
+                enhancement=enhancement,
+                colormap=colormap,
+                pixel_style=pixel_style,
+                pixel_size=pixel_size,
+                log=log,
+                pbar=pbar,
+            )
+            continue
+        if not isinstance(val, torch.Tensor):
+            continue
+
+        # Try to get image arrays for this batch index
+        images = _slice_tensor_to_image(val, batch_index)
+        if not images:
+            continue
+
+        subdir.mkdir(parents=True, exist_ok=True)
+        for suf, arr in images:
+            if arr.ndim == 2 and target_shape is not None:
+                arr = _resize_feature_map(arr, target_shape)
+            save_path = subdir / f"{key}{suf}.png"
+            _save_enhanced_pixelated_image(
+                arr,
+                str(save_path),
+                enhancement=enhancement,
+                colormap=colormap,
+                pixel_style=pixel_style,
+                pixel_size=pixel_size,
+            )
+            saved += 1
+            if pbar is not None:
+                try:
+                    pbar.update(1)
+                except Exception:
+                    pass
+    if saved and log is not None:
+        log(f"Saved {saved} image(s) under {out_dir}")
+    return saved
+
+
+def _estimate_image_count(outputs, batch_index: int) -> int:
+    count = 0
+    for _, val in outputs.items():
+        if isinstance(val, dict):
+            count += _estimate_image_count(val, batch_index)
+        elif isinstance(val, torch.Tensor):
+            try:
+                imgs = _slice_tensor_to_image(val, batch_index)
+                count += len(imgs)
+            except Exception:
+                pass
+    return count
 
 
 def save_features_per_channel(
@@ -204,22 +663,17 @@ def save_features_per_channel(
     filenames,
     epoch: int,
     output_dir,
+    enhancement: str = "clahe",
+    colormap: str = "jet",
+    pixel_style: str = "pixelated",
+    pixel_size: int = 4,
+    resize_to_target: bool = True,
+    use_tqdm: bool = True,
 ):
-    """Save inputs, targets, preds, and per-channel feature maps to per-filename folders.
-
-    Directory layout:
-      output_dir/filenames/<name>/
-        input.png
-        target.png
-        pred.png
-        <feature_name>/ch_000.png, ch_001.png, ... (for multi-channel)
-        <feature_name>.png (for single-channel)
-    """
     base = Path(output_dir) / "features"
     base.mkdir(parents=True, exist_ok=True)
 
     B = inputs.size(0)
-    # Ensure filenames is a list of strings
     if not isinstance(filenames, (list, tuple)):
         filenames = [str(filenames)] * B
 
@@ -228,47 +682,65 @@ def save_features_per_channel(
         out_dir = base / name
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save input image
         in_img = _to_numpy_image(inputs[i])
-        plt.imsave(
-            out_dir / "input.png",
-            in_img if in_img.ndim == 3 else in_img,
-            cmap=None if in_img.ndim == 3 else "gray",
-        )
+        plt.imsave(out_dir / "input.png", in_img, cmap=None)
 
-        # Save target mask
+        # Get target shape for resizing
+        target_shape = None
+        if resize_to_target:
+            tgt = targets[i]
+            if tgt.ndim == 3 and tgt.shape[0] == 1:
+                target_shape = (tgt.shape[1], tgt.shape[2])  # (H, W)
+            elif tgt.ndim == 2:
+                target_shape = (tgt.shape[0], tgt.shape[1])  # (H, W)
+
         tgt = targets[i]
         tgt_np = _to_numpy_image(
             tgt.squeeze(0) if tgt.ndim == 3 and tgt.shape[0] == 1 else tgt
         )
         plt.imsave(out_dir / "target.png", tgt_np, cmap="gray")
 
-        # Save predicted mask
         pred = pred_masks[i]
         pred_np = _to_numpy_image(
             pred.squeeze(0) if pred.ndim == 3 and pred.shape[0] == 1 else pred
         )
         plt.imsave(out_dir / "pred.png", pred_np, cmap="gray")
 
-        # Iterate over output features
-        for key, tensor in outputs.items():
-            if not isinstance(tensor, torch.Tensor):
-                continue
-            if tensor.ndim == 4 and tensor.size(0) > i:
-                feat = tensor[i]
-                C = feat.size(0)
-                H, W = feat.size(-2), feat.size(-1)
-                # Only save image-like maps
-                if H >= 2 and W >= 2:
-                    if C == 1:
-                        arr = _to_numpy_image(feat[0])
-                        plt.imsave(out_dir / f"{key}.png", arr, cmap="gray")
-                    else:
-                        ch_dir = out_dir / key
-                        ch_dir.mkdir(parents=True, exist_ok=True)
-                        for c in range(C):
-                            arr = _to_numpy_image(feat[c])
-                            plt.imsave(ch_dir / f"ch_{c:03d}.png", arr, cmap="gray")
+        # Log header for this sample
+        print(f"[features] Saving for sample {i} ({name}) ...")
+
+        # Create tqdm progress bar if enabled
+        pbar = None
+        if use_tqdm and _HAS_TQDM:
+            try:
+                total_est = _estimate_image_count(outputs, i)
+            except Exception:
+                total_est = None
+            pbar = tqdm(
+                total=total_est, desc=f"features:{name}", unit="img", leave=False
+            )
+
+        # Recursively walk all outputs and save what looks like images for this sample
+        total_saved = recursion_save_feature(
+            out_dir,
+            outputs,
+            batch_index=i,
+            target_shape=target_shape,
+            enhancement=enhancement,
+            colormap=colormap,
+            pixel_style=pixel_style,
+            pixel_size=pixel_size,
+            log=lambda msg: print(f"[features][{name}] {msg}"),
+            pbar=pbar,
+        )
+
+        if pbar is not None:
+            try:
+                pbar.close()
+            except Exception:
+                pass
+
+        print(f"[features] Done {name}: {total_saved} image(s) saved.")
 
 
 def is_dist_avail_and_initialized():
@@ -351,7 +823,6 @@ def get_model_info(model, input_shape, device) -> dict:
     info["trainable_params"] = trainable_params
     info["non_trainable_params"] = total_params - trainable_params
 
-    # Try to compute FLOPs and MACs using fvcore if available
     try:
         from fvcore.nn import FlopCountAnalysis
 
@@ -368,7 +839,6 @@ def get_model_info(model, input_shape, device) -> dict:
             }
         )
     except Exception:
-        # fvcore not available or failed; ignore
         pass
 
     return info

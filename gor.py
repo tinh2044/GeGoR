@@ -119,6 +119,7 @@ class GOR(nn.Module):
             A1_map: (B, h, w) attention spatial map
             A2_prop: same as A2_dense (operator for propagation)
         """
+        outputs = {}
         device = E.device
         B = E.shape[0]
         N = self.N
@@ -128,48 +129,53 @@ class GOR(nn.Module):
 
         if P is None:
             Pcoords = self.P.to(device)  # (N,2)
+            outputs["Pcoords"] = Pcoords
         else:
             Pcoords = P.to(device)
 
         bins = self.bins.to(device)  # (K_o,2)
+        outputs["bins"] = bins
 
         k_nn = min(self.topk, N)
         # topk values and indices per row
         topk_vals, topk_idx = torch.topk(
             A0, k=k_nn, dim=-1
         )  # shapes (B,N,k_nn), (B,N,k_nn)
-
+        outputs["topk_vals"] = topk_vals
         p_j = Pcoords[topk_idx.view(-1)].view(B, N, k_nn, 2)  # (B,N,k,2)
         # p_i: per row's base coordinate
+        outputs["p_j"] = p_j
         p_i = (
             Pcoords.unsqueeze(0).unsqueeze(2).expand(B, N, k_nn, 2).to(device)
         )  # (B,N,k,2)
-
+        outputs["p_i"] = p_i
         # offset vectors
         v = p_j - p_i  # (B,N,k,2)
-
+        outputs["v"] = v
         v_exp = v.unsqueeze(-2)  # (B,N,k,1,2)
         bins_exp = bins.view(1, 1, 1, self.K_o, 2)  # (1,1,1,K_o,2)
         diff = v_exp - bins_exp  # (B,N,k,K_o,2)
+        outputs["diff"] = diff
         dist2 = (diff**2).sum(dim=-1)  # (B,N,k,K_o)
+        outputs["dist2"] = dist2
         kappa = torch.exp(-dist2 / (2.0 * (self.tau**2) + 1e-12))  # (B,N,k,K_o)
-
+        outputs["kappa"] = kappa
         S_vals = topk_vals  # (B,N,k)
         # multiply and sum over i and neighbor -> H: (B, K_o)
         H = (S_vals.unsqueeze(-1) * kappa).sum(
             dim=(1, 2)
         )  # sum over i and neighbors -> (B, K_o)
-
+        outputs["H"] = H
         W = F.softmax(self.eta * H, dim=-1)  # (B, K_o)
 
         W_exp = W.view(B, 1, 1, self.K_o)  # (B,1,1,K_o)
         R_edges = self.lambda0 + (W_exp * kappa).sum(dim=-1)  # (B, N, k)
-
+        outputs["R_edges"] = R_edges
         tildeA_edges = S_vals * R_edges  # (B,N,k)
         row_sums = tildeA_edges.sum(dim=-1, keepdim=True)  # (B,N,1)
         row_sums = row_sums + self.eps
         A1_edges = tildeA_edges / row_sums  # (B,N,k)
-
+        outputs["A1_edges"] = A1_edges
         # ----------------------------
         # 7) Entropy per row (over neighbors): p = softmax(alpha * A1_edges) then entropy
         # ----------------------------
@@ -198,43 +204,51 @@ class GOR(nn.Module):
         A2_dense = A2_dense / row_sum_dense
 
         exp_fwd = torch.exp(self.beta * A2_dense)
+        outputs["exp_fwd"] = exp_fwd
         exp_rev = torch.exp(self.beta * A2_dense.transpose(-1, -2))
+        outputs["exp_rev"] = exp_rev
         denom = exp_fwd + exp_rev + self.eps
         P_dir = exp_fwd / denom  # (B,N,N)
+        outputs["P_dir"] = P_dir
         # zero diagonal
         diag_idx = torch.arange(N, device=device)
         P_dir[:, diag_idx, diag_idx] = 0.0
-
+        outputs["P_dir"] = P_dir
         s_evidence = (A2_dense * P_dir).sum(dim=-1)  # (B,N)
         # compute t: A2_dense_transpose * (1 - P_dir_transpose) summed over rows => equivalently:
         t_evidence = (A2_dense.transpose(-1, -2) * (1.0 - P_dir.transpose(-1, -2))).sum(
             dim=-1
         )  # (B,N)
         # normalize to priors
+        outputs["s_evidence"] = s_evidence
+        outputs["t_evidence"] = t_evidence
         denom_st = s_evidence + t_evidence + self.eps
         pi_src = s_evidence / denom_st  # (B,N)
         pi_tgt = 1.0 - pi_src
-
+        outputs["pi_src"] = pi_src
+        outputs["pi_tgt"] = pi_tgt
         W_mean = W.mean(dim=0)  # (K_o,)
         Wm_exp = W_mean.view(1, 1, 1, self.K_o)  # (1,1,1,K_o)
         # kappa currently is (B,N,k,K_o)
         # compute chi_edges per batch: (B,N,k) = sum_k W_mean[k] * kappa_{b,i,j,k}
         chi_edges = (kappa * Wm_exp.to(device)).sum(dim=-1)  # (B,N,k)
-
+        outputs["chi_edges"] = chi_edges
         # local smoothing weights w_{b,i,j} = softmax(beta' * A2_edges) along neighbors
         w_local = F.softmax(self.beta_prime * A2_edges, dim=-1)  # (B,N,k)
+        outputs["w_local"] = w_local
         # node-level intensity q
         q_nodes = (w_local * chi_edges).sum(dim=-1)  # (B,N)
-
+        outputs["q_nodes"] = q_nodes
         A1_map = q_nodes.view(B, self.h, self.w).unsqueeze(1)  # (B,1,h,w)
         A1_smoothed = F.conv2d(
             A1_map, self.smooth_kernel.to(device), padding=self.smooth_ks // 2
         )
+        outputs["A1_smoothed"] = A1_smoothed
         A1_map = torch.sigmoid(A1_smoothed)  # (B, 1, h, w)
-
+        outputs["A1_map"] = A1_map
         # A2_prop operator (same as A2_dense row-normalized)
         A2_prop = A2_dense
-
+        outputs["A2_prop"] = A2_prop
         return {
             "A2": A2_dense,
             "U": U,
