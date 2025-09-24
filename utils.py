@@ -103,7 +103,8 @@ def save_eval_images(
         input_img = inputs[i].cpu()
         target_mask = targets[i].cpu()
         pred_mask = pred_masks[i].cpu()
-        orig_img = origs[i].cpu()
+        if origs is not None:
+            orig_img = origs[i].cpu()
         filename = filenames[i]
 
         # Calculate metrics for this sample
