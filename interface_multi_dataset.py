@@ -194,7 +194,7 @@ def test_single_dataset(
         ds = PairFolderDataset(
             dataset_info["raw_dir"],
             dataset_info["mask_dir"],
-            orig_dir=dataset_info["orig_dir"],
+            orig_dir=None,
             image_size=image_size,
             center_crop=bool(data_cfg.get("center_crop_eval", False)),
         )
