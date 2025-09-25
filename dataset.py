@@ -1,7 +1,7 @@
 import torch
 import torch.utils.data as data
 import torchvision.transforms.functional as TF
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 import random
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -56,6 +56,18 @@ class ForgeryDataset(data.Dataset):
         #     print(f"  Base dir: {self.base_dir}")
         # print(f"  Raw: {self.raw_dir} ({len(self._list_files(self.raw_dir))} files)")
         # print(f"  Mask: {self.mask_dir} ({len(self._list_files(self.mask_dir))} files)")
+
+    def _safe_open_image(self, path: Path, mode: str) -> Optional[Image.Image]:
+        try:
+            img = Image.open(path)
+            if mode == "RGB":
+                return img.convert("RGB")
+            if mode == "L":
+                return img.convert("L")
+            return img
+        except (UnidentifiedImageError, OSError, ValueError) as e:
+            print(f"Warning: failed to open image '{path}': {e}")
+            return None
 
     def _list_files(self, folder: Path) -> List[Path]:
         if not folder.exists():
@@ -126,12 +138,21 @@ class ForgeryDataset(data.Dataset):
 
     def __getitem__(self, idx):
         img_path, mask_path = self.samples[idx]
-        img = Image.open(img_path).convert("RGB")
 
-        mask = Image.open(mask_path).convert("L")
+        img = self._safe_open_image(img_path, "RGB")
+        if img is None:
+            return None
 
-        transform_pair = self._get_pair_transforms(is_train=(self.split == "train"))
-        image_tensor, mask_tensor = transform_pair(img, mask)
+        mask = self._safe_open_image(mask_path, "L")
+        if mask is None:
+            return None
+
+        try:
+            transform_pair = self._get_pair_transforms(is_train=(self.split == "train"))
+            image_tensor, mask_tensor = transform_pair(img, mask)
+        except Exception as e:
+            print(f"Warning: failed to transform sample '{img_path.name}': {e}")
+            return None
 
         sample = {
             "image": image_tensor,
