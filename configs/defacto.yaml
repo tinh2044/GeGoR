@@ -11,6 +11,7 @@ data:
   extensions: [".png", ".jpg", ".jpeg", ".bmp", ".tiff"]
   batch_size: 4
   num_workers: 4
+  ignore_dataset: ["Columbia", "CASIAv2", "NIST16", "COVERAGE"]
 
 model:
   encoder_out_ch: 256

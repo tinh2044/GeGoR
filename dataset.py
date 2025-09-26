@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.utils.data as data
 import torchvision.transforms.functional as TF
@@ -32,9 +33,6 @@ class ForgeryDataset(data.Dataset):
         self.crop_size = int(self.cfg.get("crop_size", self.image_size))
         self.use_center_crop_eval = bool(self.cfg.get("center_crop_eval", False))
         self.return_paths = bool(self.cfg.get("return_paths", False))
-        self.extensions = tuple(
-            self.cfg.get("extensions", [".png", ".jpg", ".jpeg", ".bmp", ".tiff"])
-        )
 
         self.split_list: Optional[set] = None
         split_list_file = self.cfg.get(f"{split}_list")  # e.g., train_list, val_list
@@ -47,6 +45,7 @@ class ForgeryDataset(data.Dataset):
                     if line.strip()
                 ]
                 self.split_list = set(items)
+        self.ignore_dataset = self.cfg.get("ignore_dataset", [])
 
         self.samples = self._build_samples()
         random.shuffle(self.samples)
@@ -69,40 +68,26 @@ class ForgeryDataset(data.Dataset):
             print(f"Warning: failed to open image '{path}': {e}")
             return None
 
-    def _list_files(self, folder: Path) -> List[Path]:
-        if not folder.exists():
-            return []
-        files = []
-        for fp in folder.rglob("*"):
-            if fp.is_file() and fp.suffix.lower() in self.extensions:
-                files.append(fp)
-        return files
-
     def _build_samples(self) -> List[Tuple[Path, Optional[Path]]]:
         samples: List[Tuple[Path, Optional[Path]]] = []
 
         if self.raw_dir.exists() and self.mask_dir.exists():
-            raw_index: Dict[str, List[Path]] = {}
-            for p in self._list_files(self.raw_dir):
-                base = normalize_basename(p.name)
-                if self.split_list and base not in self.split_list:
-                    continue
-                raw_index.setdefault(base, []).append(p)
-
-            mask_index: Dict[str, List[Path]] = {}
-            for p in self._list_files(self.mask_dir):
-                base = normalize_basename(p.name)
-                if self.split_list and base not in self.split_list:
-                    continue
-                mask_index.setdefault(base, []).append(p)
-
-            matched = sorted(set(raw_index.keys()) & set(mask_index.keys()))
-            for base in matched:
-                img_path = sorted(raw_index[base])[0]
-                mask_path = sorted(mask_index[base])[0]
-                samples.append((img_path, mask_path))
-
-            print(f"  Found {len(matched)} tampered pairs")
+            raw_dir = str(self.raw_dir)
+            mask_dir = str(self.mask_dir)
+            list_files = os.listdir(raw_dir)
+            list_files = [x for x in list_files if os.path.exists(f"{mask_dir}/{x}")]
+            filter_files = []
+            for file in list_files:
+                is_ignore = False
+                for ignore_dataset in self.ignore_dataset:
+                    if ignore_dataset in file:
+                        is_ignore = True
+                        break
+                if not is_ignore:
+                    filter_files.append(file)
+            samples = [
+                (Path(raw_dir) / file, Path(mask_dir) / file) for file in filter_files
+            ]
         return samples
 
     def __len__(self):
