@@ -170,19 +170,15 @@ class GCE(nn.Module):
 
     def forward(
         self,
-        feature_map: torch.Tensor,
-        A_bank: torch.Tensor,
-        P: Optional[torch.Tensor] = None,
-        Q: Optional[torch.Tensor] = None,
-        M: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        feature_map,
+        A_bank,
+        P = None,
+    ):
         """
         Args:
             feature_map: feature map (B, C, h, w)
             A_bank: affine bank, shape either (T, 2, 3) or (T, K, 2, 3)
             P: optional base grid coordinates (N,2). If None, use precomputed P.
-            Q: optional candidate coords (K,2). If None, use precomputed Q.
-            M: optional mapping (N,K). If None, use precomputed M.
 
         Returns:
             E: base embeddings (B, N, d)
@@ -196,10 +192,8 @@ class GCE(nn.Module):
         device = feature_map.device
         if P is None:
             P = self.P.to(device)  # (N,2)
-        if Q is None:
-            Q = self.Q.to(device)  # (K,2)
-        if M is None:
-            M = self.M.to(device)  # (N,K)
+        Q = self.Q.to(device)  # (K,2)
+        M = self.M.to(device)  # (N,K)
 
         # unify A_bank to shape (T, 2, 3)
         if A_bank.dim() == 4 and A_bank.shape[1] != 2:

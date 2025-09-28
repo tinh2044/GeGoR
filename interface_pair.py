@@ -23,6 +23,7 @@ def _pair_by_stem(
     if exts is None:
         exts = [".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"]
     raw_index: Dict[str, Path] = {}
+    orig_index: Dict[str, Path] = None
     for p in raw_dir.iterdir():
         if p.suffix.lower() in exts and p.is_file():
             raw_index[p.stem.replace("_gt", "")] = p
@@ -39,7 +40,6 @@ def _pair_by_stem(
                 orig_index[p.stem.replace("_gt", "")] = p
 
     keys = sorted(set(raw_index.keys()) & set(mask_index.keys()))
-    print(keys)
     return [
         (
             raw_index[k],
@@ -117,13 +117,16 @@ class PairFolderDataset(data.Dataset):
     def collate_fn(batch):
         images = torch.stack([b["images"] for b in batch])
         masks = torch.stack([b["masks"] for b in batch])
-        origs = torch.stack([b["origs"] for b in batch])
+        if batch[0]["origs"] is not None:
+            origs = torch.stack([b["origs"] for b in batch])
+        else:
+            origs = None
         filenames = [b["filenames"] for b in batch]
         return {
             "images": images,
             "masks": masks,
             "filenames": filenames,
-            "origs": origs,
+            "origs": origs if origs is not None else None,
         }
 
 
@@ -137,13 +140,17 @@ def build_argparser():
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--save_all", action="store_true")
     p.add_argument("--output_dir", type=str, default=None)
+    p.add_argument("--use_orig", action="store_true")
     return p
 
 
 def main(args):
     raw_dir = f"{args.i}/raw"
     mask_dir = f"{args.i}/mask"
-    orig_dir = f"{args.i}/origin"
+    if args.use_orig:
+        orig_dir = f"{args.i}/origin"
+    else:
+        orig_dir = None
     with open(args.cfg_path, "r", encoding="utf-8") as f:
         cfg = yaml.load(f, Loader=yaml.FullLoader)
 
@@ -195,7 +202,7 @@ def main(args):
         ):
             inputs = batch["images"].to(device)
             targets = batch["masks"].to(device)
-            origs = batch["origs"].to(device)
+            origs = batch["origs"].to(device) if batch["origs"] is not None else None
             filenames = batch["filenames"]
 
             outputs = model(inputs, gt_mask=targets)

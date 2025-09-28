@@ -94,9 +94,57 @@ def main(args, cfg):
     np.random.seed(seed)
     random.seed(seed)
     cudnn.benchmark = False
+    cfg_data = cfg["data"]
+    
+    try:
+        model = CMFDNet(**cfg["model"])
+        model = model.to(device)
+
+        # Wrap with DDP if needed
+        if is_distributed:
+            if device.type == "cuda":
+                model = DDP(
+                    model,
+                    device_ids=[local_rank],
+                    output_device=local_rank,
+                    find_unused_parameters=True,
+                )
+            else:
+                model = DDP(model, find_unused_parameters=True)
+
+        model_for_params = model.module if is_distributed else model
+        n_parameters = utils.count_model_parameters(model_for_params)
+        if rank == 0:
+            print(f"Model created successfully with {n_parameters:,} parameters")
+    except Exception as e:
+        print(f"Error creating model: {e}")
+        print("Model config:", cfg["model"])
+        raise
+    
+    if rank == 0:
+        print(f"Number of parameters: {n_parameters}")
+
+    if rank == 0:
+        input_shape = (
+            args.batch_size,
+            3,
+            cfg_data["image_size"],
+            cfg_data["image_size"],
+        )
+        model_info = utils.get_model_info(model_for_params, input_shape, device)
+
+        print("Model Information:")
+        print(f"  Total parameters: {model_info['total_params']:,}")
+        print(f"  Trainable parameters: {model_info['trainable_params']:,}")
+        print(f"  Non-trainable parameters: {model_info['non_trainable_params']:,}")
+
+        if "flops" in model_info:
+            print(f"  FLOPs: {model_info['flops_str']}")
+        print()
+
+
 
     # Create datasets
-    cfg_data = cfg["data"]
     train_data = ForgeryDataset(split="train", cfg=cfg_data)
     test_data = ForgeryDataset(split="test", cfg=cfg_data)
 
@@ -126,52 +174,6 @@ def main(args, cfg):
         sampler=test_sampler,
         pin_memory=True,
     )
-
-    try:
-        model = CMFDNet(**cfg["model"])
-        model = model.to(device)
-
-        # Wrap with DDP if needed
-        if is_distributed:
-            if device.type == "cuda":
-                model = DDP(
-                    model,
-                    device_ids=[local_rank],
-                    output_device=local_rank,
-                    find_unused_parameters=True,
-                )
-            else:
-                model = DDP(model, find_unused_parameters=True)
-
-        model_for_params = model.module if is_distributed else model
-        n_parameters = utils.count_model_parameters(model_for_params)
-        if rank == 0:
-            print(f"Model created successfully with {n_parameters:,} parameters")
-    except Exception as e:
-        print(f"Error creating model: {e}")
-        print("Model config:", cfg["model"])
-        raise
-
-    if rank == 0:
-        print(f"Number of parameters: {n_parameters}")
-
-    if rank == 0:
-        input_shape = (
-            args.batch_size,
-            3,
-            cfg_data["image_size"],
-            cfg_data["image_size"],
-        )
-        model_info = utils.get_model_info(model_for_params, input_shape, device)
-
-        print("Model Information:")
-        print(f"  Total parameters: {model_info['total_params']:,}")
-        print(f"  Trainable parameters: {model_info['trainable_params']:,}")
-        print(f"  Non-trainable parameters: {model_info['non_trainable_params']:,}")
-
-        if "flops" in model_info:
-            print(f"  FLOPs: {model_info['flops_str']}")
-        print()
 
     if args.finetune:
         if rank == 0:

@@ -346,10 +346,9 @@ class CMFDNet(nn.Module):
         mask_logits = self.loc_head(F_final, target_hw=(H, W))
         mask_probs = F.softmax(mask_logits, dim=1)
         mask = mask_probs[:, 1:2]
-
+        print(mask.shape, mask_probs.shape)
         loss_dict = {}
         if gt_mask is not None:
-            # Weighted CE (class 1 emphasized). Optionally compute dynamic pos weight by class frequency.
             with torch.no_grad():
                 if self.loss_dynamic_pos_weight:
                     total = float(gt_mask.numel())
@@ -408,8 +407,8 @@ if __name__ == "__main__":
     num_parameter = sum(p.numel() for p in model.parameters())
     print(f"Number of parameters: {num_parameter}")
 
-    x = torch.randn(1, 3, 256, 256)
-    gt_mask = torch.randint(0, 2, (1, 1, 256, 256)).float()
+    x = torch.randn(1, 3, 384, 384)
+    gt_mask = torch.randint(0, 2, (1, 1, 384, 384)).float()
 
     print(f"Input shape: {x.shape}")
     print(f"GT mask shape: {gt_mask.shape}")
