@@ -192,7 +192,7 @@ class GCE(nn.Module):
         assert C == self.C and h == self.h and w == self.w, (
             "Feature shape mismatch with module config."
         )
-
+        outputs = {}
         device = feature_map.device
         if P is None:
             P = self.P.to(device)  # (N,2)
@@ -200,7 +200,9 @@ class GCE(nn.Module):
             Q = self.Q.to(device)  # (K,2)
         if M is None:
             M = self.M.to(device)  # (N,K)
-
+        outputs["Q"] = Q
+        outputs["M"] = M
+        outputs["P"] = P
         # unify A_bank to shape (T, 2, 3)
         if A_bank.dim() == 4 and A_bank.shape[1] != 2:
             # fallback: assume shape (T, K, 2, 3)
@@ -228,6 +230,9 @@ class GCE(nn.Module):
 
         # Loop over hypotheses t (T small typically)
         for t_idx in range(T):
+            k = f"hypotheses_{t_idx}"
+
+            outputs[k] = {}
             A_single = A_t[t_idx]  # (2,3)
             # If A_single is not normalized for affine_grid, the user must pre-normalize before calling.
             # Expand to batch
@@ -236,6 +241,7 @@ class GCE(nn.Module):
             grid = F.affine_grid(
                 A_batch, size=(B, C, h, w), align_corners=False
             )  # (B,h,w,2)
+            outputs[k]["grid"] = grid
             F_warp = F.grid_sample(
                 feature_map,
                 grid,
@@ -243,17 +249,21 @@ class GCE(nn.Module):
                 padding_mode="border",
                 align_corners=False,
             )  # (B,C,h,w)
+            outputs[k]["F_warp"] = F_warp
 
             # Extract patches at candidate positions via unfold (this yields patches on regular strided grid)
             # patches: (B, C * k * k, K)
             patches = unfold(F_warp)  # (B, C*k*k, K)
+            outputs[k]["patches"] = patches
             Bp, _, K = patches.shape
             # reshape to (B*K, C, k, k) for conv
             patches = patches.permute(0, 2, 1).contiguous()  # (B, K, C*k*k)
             patches = patches.view(B * K, C, self.k, self.k)  # (B*K, C, k, k)
+            outputs[k]["patches_reshaped"] = patches
 
             # projector: pointwise conv + gap + linear
             x = self.pointwise(patches)  # (B*K, m, k, k)
+            outputs[k]["x_pw"] = x
             # GAP
             x = x.mean(dim=(2, 3))  # (B*K, m)
             z_t = self.proj(x)  # (B*K, d)
@@ -261,33 +271,36 @@ class GCE(nn.Module):
             z_t = z_t.view(B, K, self.d)
             # L2 norm
             z_t = z_t / (z_t.norm(dim=-1, keepdim=True).clamp_min(self.eps))
+            outputs[k]["z_t"] = z_t
             z_list.append(z_t)
 
         # stack z: (B, T, K, d)
         Z = torch.stack(z_list, dim=1)  # (B, T, K, d)
-
+        outputs["Z"] = Z
         # Hypothesis pooling over T, compute scores s^{(t)} = r^T z^{(t)}
         # r shape (d,) -> expand
         r = self.r.to(device).view(1, 1, 1, self.d)  # (1,1,1,d)
         # compute dot product along last dim
         s = (Z * r).sum(dim=-1)  # (B, T, K)
+        outputs["s"] = s
         # softmax over T
         w = F.softmax(self.tau * s, dim=1)  # (B, T, K)
         w = w.unsqueeze(-1)  # (B, T, K, 1)
-
+        outputs["w"] = w
         # weighted sum across T: g = sum_t w_t * z_t
         g = (w * Z).sum(dim=1)  # (B, K, d)
-
+        outputs["g"] = g
         # Lift to base grid P via mapping M (N,K): e = M @ g  -> use einsum
         # M: (N,K) , g: (B,K,d) -> E: (B,N,d)
         E = torch.einsum("nk,bkd->bnd", M.to(device), g)  # (B, N, d)
+        outputs["E"] = E
         # L2 normalize embeddings
         E = E / (E.norm(dim=-1, keepdim=True).clamp_min(self.eps))
 
         # Build affinity raw via cosine (matrix multiply)
         # E: (B, N, d) -> S = E @ E^T -> (B, N, N)
         S = torch.matmul(E, E.transpose(-1, -2))  # (B, N, N)
-
+        outputs["S"] = S
         # Distance gating: build G (N,N) once from P coordinates
         # P: (N,2) with coords in feature pixel space (x,y)
         Pcoords = P.to(device)
@@ -302,7 +315,7 @@ class GCE(nn.Module):
         G = 1.0 - torch.exp(-dist2 / (2.0 * (self.sigma**2)))  # (1,N,N)
         G = G.squeeze(0)  # (N,N)
         S = S * G.unsqueeze(0)  # (B,N,N) elementwise
-
+        outputs["S_gated"] = S
         # Sparsify: keep topk per row
         B_, N, _ = S.shape
         k_nn = min(self.topk, N)
@@ -310,15 +323,15 @@ class GCE(nn.Module):
         S_sparse = torch.zeros_like(S)
         # scatter topk values into zero tensor
         S_sparse = S_sparse.scatter(-1, topk_idx, topk_vals)
-
+        outputs["S_sparse"] = S_sparse
         # Two-sided normalization
         L_r = F.softmax(self.alpha * S_sparse, dim=-1)  # row-softmax
         L_c = F.softmax(
             self.alpha * S_sparse, dim=-2
         )  # column-softmax (softmax over rows)
+        outputs["L_r"] = L_r
+        outputs["L_c"] = L_c
         A0 = L_r * L_c  # elementwise combine -> (B,N,N)
+        outputs["A0"] = A0
 
-        return {
-            "E": E,
-            "A0": A0,
-        }
+        return outputs

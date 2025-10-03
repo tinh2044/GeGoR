@@ -37,6 +37,8 @@ def _pair_by_stem(
         for p in orig_dir.iterdir():
             if p.suffix.lower() in exts and p.is_file():
                 orig_index[p.stem.replace("_gt", "")] = p
+    else:
+        orig_index = None
 
     keys = sorted(set(raw_index.keys()) & set(mask_index.keys()))
     print(keys)
@@ -117,7 +119,11 @@ class PairFolderDataset(data.Dataset):
     def collate_fn(batch):
         images = torch.stack([b["images"] for b in batch])
         masks = torch.stack([b["masks"] for b in batch])
-        origs = torch.stack([b["origs"] for b in batch])
+        origs = (
+            torch.stack([b["origs"] for b in batch])
+            if batch[0]["origs"] is not None
+            else None
+        )
         filenames = [b["filenames"] for b in batch]
         return {
             "images": images,
@@ -130,21 +136,25 @@ class PairFolderDataset(data.Dataset):
 def build_argparser():
     p = argparse.ArgumentParser("Interface Pair Inference")
     p.add_argument("-i", type=str, required=True)
-    p.add_argument("--cfg_path", type=str, default="configs/casiav2.yaml")
+    p.add_argument("--cfg", type=str, default="configs/casiav2.yaml")
     p.add_argument("--resume", type=str, required=True, help="path to checkpoint .pth")
     p.add_argument("--batch_size", type=int, default=1)
     p.add_argument("--num_workers", type=int, default=2)
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--save_all", action="store_true")
     p.add_argument("--output_dir", type=str, default=None)
+    p.add_argument("--use_orig", action="store_true")
     return p
 
 
 def main(args):
     raw_dir = f"{args.i}/raw"
     mask_dir = f"{args.i}/mask"
-    orig_dir = f"{args.i}/origin"
-    with open(args.cfg_path, "r", encoding="utf-8") as f:
+    if args.use_orig:
+        orig_dir = f"{args.i}/origin"
+    else:
+        orig_dir = None
+    with open(args.cfg, "r", encoding="utf-8") as f:
         cfg = yaml.load(f, Loader=yaml.FullLoader)
 
     model_cfg = cfg.get("model", {})
@@ -191,11 +201,14 @@ def main(args):
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(
-            metric_logger.log_every(dl, print_freq=50, header="Infer")
+            metric_logger.log_every(dl, print_freq=1, header="Infer")
         ):
             inputs = batch["images"].to(device)
             targets = batch["masks"].to(device)
-            origs = batch["origs"].to(device)
+            origs = batch["origs"]
+            if origs is not None:
+                origs = origs.to(device)
+
             filenames = batch["filenames"]
 
             outputs = model(inputs, gt_mask=targets)
@@ -215,6 +228,15 @@ def main(args):
                 output_dir=str(output_dir),
                 save_all=args.save_all,
                 origs=origs,
+            )
+            utils.save_features_per_channel(
+                inputs,
+                pred_masks,
+                targets,
+                outputs,
+                filenames,
+                epoch=0,
+                output_dir=str(output_dir),
             )
 
     metric_logger.synchronize_between_processes()

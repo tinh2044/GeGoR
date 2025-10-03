@@ -5,6 +5,8 @@ from torchvision import models
 from gce import GCE
 from gor import GOR
 
+import math
+
 
 def _binary_dice_score(
     pred: torch.Tensor, target: torch.Tensor, smooth: float = 1.0
@@ -218,15 +220,28 @@ def _make_base_centers(h: int, w: int, device: torch.device) -> torch.Tensor:
     return torch.stack([xx.reshape(-1), yy.reshape(-1)], dim=1)  # (N,2)
 
 
-def _identity_affine_bank(
-    T: int, N: int, noise: float = 0.0, device=None
-) -> torch.Tensor:
-    A = torch.zeros(T, N, 2, 3, device=device)
-    A[:, :, 0, 0] = 1.0
-    A[:, :, 1, 1] = 1.0
-    if noise > 0.0:
-        A = A + noise * torch.randn_like(A)
+
+def _affine_bank_linspace(T: int, max_angle_deg=20.0, max_trans=0.05, device=None):
+    device = device or torch.device("cpu")
+    A = torch.zeros(T, 2, 3, device=device)
+    angles = torch.linspace(-max_angle_deg, max_angle_deg, T, device=device) * math.pi / 180.0
+    scales = torch.ones(T, device=device)  # keep scale 1.0 or set linspace if you want
+    tx = torch.linspace(-max_trans, max_trans, T, device=device)
+    ty = torch.linspace(-max_trans, max_trans, T, device=device)
+
+    for t in range(T):
+        c = torch.cos(angles[t])
+        s = torch.sin(angles[t])
+        sc = scales[t]
+        A[t, 0, 0] = sc * c
+        A[t, 0, 1] = -sc * s
+        A[t, 1, 0] = sc * s
+        A[t, 1, 1] = sc * c
+        A[t, 0, 2] = tx[t]
+        A[t, 1, 2] = ty[t]
+
     return A
+
 
 
 class CMFDNet(nn.Module):
@@ -273,7 +288,6 @@ class CMFDNet(nn.Module):
         self.a1_refine = A1Refine(hidden=32)
         fuse_in_ch = 4 * aspp_out_ch + 4
         self.fuse = ConvFuse(in_ch=fuse_in_ch, hidden=256, out_ch=fuse_out_ch)
-        self.det_head = DetectionHead(in_ch=fuse_out_ch, hidden=128)
         self.loc_head = LocalizationHead(in_ch=fuse_out_ch, mid_ch=128, out_ch=num_cls)
         self.T_affine = int(T_affine)
 
@@ -290,17 +304,69 @@ class CMFDNet(nn.Module):
         self.tversky_beta = float(loss_cfg.get("tversky_beta", 0.3))
         self.tversky_gamma = float(loss_cfg.get("tversky_gamma", 0.75))
 
+    def compute_loss(
+        self,
+        mask_logits,
+        mask_probs,
+        gt_mask,
+        device,
+    ):
+        loss_dict = {}
+        with torch.no_grad():
+            if self.loss_dynamic_pos_weight:
+                total = float(gt_mask.numel())
+                pos = float(gt_mask.sum().item())
+                neg = max(total - pos, 0.0)
+                w1 = 1.0 if pos <= 0.0 else max(1.0, min(neg / (pos + 1e-6), 20.0))
+            else:
+                w1 = self.loss_pos_weight
+        weight = torch.tensor([1.0, w1], device=device, dtype=torch.float32)
+        ce = F.cross_entropy(mask_logits, gt_mask.squeeze(1).long(), weight=weight)
+
+        p_pos = mask_probs[:, 1:2]
+        t_pos = gt_mask.float()
+
+        dice_loss = 1.0 - _binary_dice_score(p_pos, t_pos)
+        iou_loss = _soft_iou_loss(p_pos, t_pos)
+        ft_loss = _focal_tversky_loss(
+            p_pos, t_pos, self.tversky_alpha, self.tversky_beta, self.tversky_gamma
+        )
+
+        total_loss = ce
+        total_loss = total_loss + self.loss_lambda_dice * dice_loss
+        total_loss = total_loss + self.loss_lambda_iou * iou_loss
+        total_loss = total_loss + self.loss_lambda_ft * ft_loss
+
+        loss_dict["ce"] = ce
+        loss_dict["dice"] = dice_loss
+        loss_dict["iou"] = iou_loss
+        loss_dict["focal_tversky"] = ft_loss
+        loss_dict["total"] = total_loss
+
+        return loss_dict
+
+    def vec_to_map(self, v: torch.Tensor, hh: int, ww: int) -> torch.Tensor:
+        return v.view(v.shape[0], 1, hh, ww)
+
+    def propagate(self, F_attn: torch.Tensor, A2_op: torch.Tensor) -> torch.Tensor:
+        B_, C_, H_, W_ = F_attn.shape
+        X = F_attn.permute(0, 2, 3, 1).contiguous().view(B_, H_ * W_, C_)
+        Y = torch.bmm(A2_op, X)  # (B,N,C)
+        return Y.view(B_, H_, W_, C_).permute(0, 3, 1, 2).contiguous()
+
     def forward(self, x: torch.Tensor, gt_mask: torch.Tensor = None) -> dict:
         B, _, H, W = x.shape
         device = x.device
         Fmap = self.backbone(x)  # (B,C,h,w)
         _, C, h, w = Fmap.shape
         N = h * w
-
+        outputs = {}
         P = _make_base_centers(h, w, device)  # (N,2)
-        A_bank = _identity_affine_bank(
-            self.T_affine, N, noise=0.0, device=device
+        A_bank = _affine_bank_linspace(
+            self.T_affine, N, device=device
         )  # (T,N,2,3)
+        outputs["P"] = P
+        outputs["A_bank"] = A_bank
 
         gce_out = self.gce(Fmap, A_bank, M=None, P=P)
         E = gce_out["E"]  # (B,N,d) unused here but available
@@ -312,80 +378,48 @@ class CMFDNet(nn.Module):
         pi_src = gor_out["pi_src"]  # (B,N)
         pi_tgt = gor_out["pi_tgt"]  # (B,N)
         A1_map = gor_out["A1_map"]  # (B,1,h,w)
-        A1_map = self.a1_refine(A1_map)  # (B,1,h,w)
-
+        A1_refine = self.a1_refine(A1_map)  # (B,1,h,w)
+        outputs["A1_refine"] = A1_refine
         F_aspp1 = self.aspp1(Fmap)
         F_aspp2 = self.aspp2(Fmap)
 
-        F_attn1 = F_aspp1 * A1_map
-        F_attn2 = F_aspp2 * A1_map
+        outputs["F_aspp1"] = F_aspp1
+        outputs["F_aspp2"] = F_aspp2
 
-        def propagate(F_attn: torch.Tensor, A2_op: torch.Tensor) -> torch.Tensor:
-            B_, C_, H_, W_ = F_attn.shape
-            X = F_attn.permute(0, 2, 3, 1).contiguous().view(B_, H_ * W_, C_)
-            Y = torch.bmm(A2_op, X)  # (B,N,C)
-            return Y.view(B_, H_, W_, C_).permute(0, 3, 1, 2).contiguous()
+        F_attn1 = F_aspp1 * A1_refine
+        F_attn2 = F_aspp2 * A1_refine
 
-        F_cooc1 = propagate(F_attn1, A2)
-        F_cooc2 = propagate(F_attn2, A2)
+        outputs["F_attn1"] = F_attn1
+        outputs["F_attn2"] = F_attn2
 
-        def vec_to_map(v: torch.Tensor, hh: int, ww: int) -> torch.Tensor:
-            return v.view(v.shape[0], 1, hh, ww)
-
-        U_map = vec_to_map(U, h, w)
-        pi_src_map = vec_to_map(pi_src, h, w)
-        pi_tgt_map = vec_to_map(pi_tgt, h, w)
-
+        F_cooc1 = self.propagate(F_attn1, A2)
+        F_cooc2 = self.propagate(F_attn2, A2)
+        outputs["F_cooc1"] = F_cooc1
+        outputs["F_cooc2"] = F_cooc2
+        U_map = self.vec_to_map(U, h, w)
+        outputs["U_map"] = U_map
+        pi_src_map = self.vec_to_map(pi_src, h, w)
+        pi_tgt_map = self.vec_to_map(pi_tgt, h, w)
+        outputs["pi_src_map"] = pi_src_map
+        outputs["pi_tgt_map"] = pi_tgt_map
         fused = torch.cat(
             [F_attn1, F_attn2, F_cooc1, F_cooc2, A1_map, U_map, pi_src_map, pi_tgt_map],
             dim=1,
         )
         F_final = self.fuse(fused)
 
-        y_det = self.det_head(F_final)
         mask_logits = self.loc_head(F_final, target_hw=(H, W))
         mask_probs = F.softmax(mask_logits, dim=1)
         mask = mask_probs[:, 1:2]
 
-        loss_dict = {}
         if gt_mask is not None:
-            # Weighted CE (class 1 emphasized). Optionally compute dynamic pos weight by class frequency.
-            with torch.no_grad():
-                if self.loss_dynamic_pos_weight:
-                    total = float(gt_mask.numel())
-                    pos = float(gt_mask.sum().item())
-                    neg = max(total - pos, 0.0)
-                    # Avoid extreme explosion; clamp in [1, 20]
-                    w1 = 1.0 if pos <= 0.0 else max(1.0, min(neg / (pos + 1e-6), 20.0))
-                else:
-                    w1 = self.loss_pos_weight
-            weight = torch.tensor([1.0, w1], device=device, dtype=torch.float32)
-            ce = F.cross_entropy(mask_logits, gt_mask.squeeze(1).long(), weight=weight)
-
-            # Auxiliary region-overlap losses on positive channel probability
-            p_pos = mask_probs[:, 1:2]
-            t_pos = gt_mask.float()
-
-            dice_loss = 1.0 - _binary_dice_score(p_pos, t_pos)
-            iou_loss = _soft_iou_loss(p_pos, t_pos)
-            ft_loss = _focal_tversky_loss(
-                p_pos, t_pos, self.tversky_alpha, self.tversky_beta, self.tversky_gamma
-            )
-
-            total_loss = ce
-            total_loss = total_loss + self.loss_lambda_dice * dice_loss
-            total_loss = total_loss + self.loss_lambda_iou * iou_loss
-            total_loss = total_loss + self.loss_lambda_ft * ft_loss
-
-            loss_dict["ce"] = ce
-            loss_dict["dice"] = dice_loss
-            loss_dict["iou"] = iou_loss
-            loss_dict["focal_tversky"] = ft_loss
-            loss_dict["total"] = total_loss
+            loss_dict = self.compute_loss(mask_logits, mask_probs, gt_mask, device)
+        else:
+            loss_dict = {}
 
         return {
-            **{f"GCE_{k}": v for k, v in gce_out.items()},
-            **{f"GOE_{k}": v for k, v in gor_out.items()},
+            "GCE": gce_out,
+            "GOE": gor_out,
             "features_base": Fmap,
             "E": E,
             "A0": A0,
@@ -395,10 +429,11 @@ class CMFDNet(nn.Module):
             "pi_src": pi_src_map,
             "pi_tgt": pi_tgt_map,
             "F_final": F_final,
-            "y_det": y_det,
             "mask_logits": mask_logits,
             "mask": mask,
             "loss": loss_dict,
+            "mask_probs": mask_probs,
+            **outputs,
         }
 
 
