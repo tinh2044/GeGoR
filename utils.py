@@ -424,7 +424,7 @@ def _slice_tensor_to_image(t: torch.Tensor, b: int) -> list:
             out.append(("_mag", mag))
         elif x.dim() == 3:  # (C,H,W) with C>3 – per-channel
             C = x.size(0)
-            for c in range(C):
+            for c in range(max(10, C)):
                 out.append((f"_ch{c:03d}", _to_numpy_image(x[c : c + 1])))
         elif x.dim() == 2:  # (H,W)
             out.append(("", _to_numpy_image(x)))
@@ -481,103 +481,6 @@ def _apply_colormap(arr: np.ndarray, colormap: str = "viridis") -> np.ndarray:
         return colored
     except Exception:
         return np.stack([arr, arr, arr], axis=-1)
-
-
-def _feature_to_color_image(
-    feat: torch.Tensor, enhancement: str = "clahe", colormap: str = "jet"
-) -> np.ndarray:
-    """Convert a feature tensor to enhanced color RGB image.
-
-    Args:
-        feat: feature tensor (C,H,W) or (H,W), should be single channel
-        enhancement: enhancement method for contrast
-        colormap: color map to use
-    Returns:
-        RGB numpy array in [0,1] range
-    """
-    arr = _to_numpy_image(feat)
-
-    if arr.ndim == 3:
-        if arr.shape[0] == 1:
-            arr = arr[0]
-        else:
-            arr = arr.mean(axis=0)
-
-    arr = _enhance_feature_map(arr, enhancement)
-
-    colored = _apply_colormap(arr, colormap)
-
-    return colored
-
-
-def _save_feature_visualization(
-    feat_dir: Path,
-    feat_name: str,
-    feat_tensor: torch.Tensor,
-    target_shape: tuple = None,
-    enhancement: str = "clahe",
-    colormap: str = "jet",
-    pixel_style: str = "pixelated",
-    pixel_size: int = 4,
-):
-    """Save enhanced and pixelated feature visualization.
-
-    Args:
-        feat_dir: directory to save feature files
-        feat_name: name of the feature
-        feat_tensor: feature tensor (C,H,W) or (H,W)
-        target_shape: target shape (H, W) to resize to, if None no resize
-        enhancement: enhancement method ('clahe', 'histogram', 'gamma', 'none')
-        colormap: color map to use
-        pixel_style: pixelation style ('sharp', 'quantized', 'pixelated', 'both')
-        pixel_size: size for pixelation effect
-    """
-    feat_dir.mkdir(parents=True, exist_ok=True)
-
-    if feat_tensor.ndim == 3 and feat_tensor.size(0) == 1:
-        # Single channel feature
-        arr = _to_numpy_image(feat_tensor[0])
-
-        # Resize if target_shape provided
-        if target_shape is not None:
-            arr = _resize_feature_map(arr, target_shape)
-
-        # Save pixelated version
-        _save_enhanced_pixelated_image(
-            arr,
-            str(feat_dir / f"{feat_name}.png"),
-            enhancement=enhancement,
-            colormap=colormap,
-            pixel_style=pixel_style,
-            pixel_size=pixel_size,
-        )
-
-    elif feat_tensor.ndim == 3 and feat_tensor.size(0) > 1:
-        # Multi-channel feature
-        C, H, W = feat_tensor.shape
-
-        for c in range(C):
-            ch_tensor = feat_tensor[c : c + 1]
-
-            # Create channel directory
-            ch_name = "ch_%03d" % c
-
-            # Get array for this channel
-            arr = _to_numpy_image(ch_tensor[0])
-
-            # Resize if target_shape provided
-            if target_shape is not None:
-                arr = _resize_feature_map(arr, target_shape)
-
-            # Save pixelated version
-            _save_enhanced_pixelated_image(
-                arr,
-                str(feat_dir / ("%s.png" % ch_name)),
-                enhancement=enhancement,
-                colormap=colormap,
-                pixel_style=pixel_style,
-                pixel_size=pixel_size,
-            )
 
 
 def recursion_save_feature(
@@ -649,7 +552,7 @@ def _estimate_image_count(outputs, batch_index: int) -> int:
         elif isinstance(val, torch.Tensor):
             try:
                 imgs = _slice_tensor_to_image(val, batch_index)
-                count += len(imgs)
+                count += len(max(10, val.shape[0]))
             except Exception:
                 pass
     return count

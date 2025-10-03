@@ -5,6 +5,8 @@ from torchvision import models
 from gce import GCE
 from gor import GOR
 
+import math
+
 
 def _binary_dice_score(
     pred: torch.Tensor, target: torch.Tensor, smooth: float = 1.0
@@ -218,15 +220,28 @@ def _make_base_centers(h: int, w: int, device: torch.device) -> torch.Tensor:
     return torch.stack([xx.reshape(-1), yy.reshape(-1)], dim=1)  # (N,2)
 
 
-def _identity_affine_bank(
-    T: int, N: int, noise: float = 0.0, device=None
-) -> torch.Tensor:
-    A = torch.zeros(T, N, 2, 3, device=device)
-    A[:, :, 0, 0] = 1.0
-    A[:, :, 1, 1] = 1.0
-    if noise > 0.0:
-        A = A + noise * torch.randn_like(A)
+
+def _affine_bank_linspace(T: int, max_angle_deg=20.0, max_trans=0.05, device=None):
+    device = device or torch.device("cpu")
+    A = torch.zeros(T, 2, 3, device=device)
+    angles = torch.linspace(-max_angle_deg, max_angle_deg, T, device=device) * math.pi / 180.0
+    scales = torch.ones(T, device=device)  # keep scale 1.0 or set linspace if you want
+    tx = torch.linspace(-max_trans, max_trans, T, device=device)
+    ty = torch.linspace(-max_trans, max_trans, T, device=device)
+
+    for t in range(T):
+        c = torch.cos(angles[t])
+        s = torch.sin(angles[t])
+        sc = scales[t]
+        A[t, 0, 0] = sc * c
+        A[t, 0, 1] = -sc * s
+        A[t, 1, 0] = sc * s
+        A[t, 1, 1] = sc * c
+        A[t, 0, 2] = tx[t]
+        A[t, 1, 2] = ty[t]
+
     return A
+
 
 
 class CMFDNet(nn.Module):
@@ -347,8 +362,8 @@ class CMFDNet(nn.Module):
         N = h * w
         outputs = {}
         P = _make_base_centers(h, w, device)  # (N,2)
-        A_bank = _identity_affine_bank(
-            self.T_affine, N, noise=0.0, device=device
+        A_bank = _affine_bank_linspace(
+            self.T_affine, N, device=device
         )  # (T,N,2,3)
         outputs["P"] = P
         outputs["A_bank"] = A_bank
