@@ -172,7 +172,7 @@ class GCE(nn.Module):
         self,
         feature_map,
         A_bank,
-        P = None,
+        P=None,
     ):
         """
         Args:
@@ -274,7 +274,7 @@ class GCE(nn.Module):
 
         # Lift to base grid P via mapping M (N,K): e = M @ g  -> use einsum
         # M: (N,K) , g: (B,K,d) -> E: (B,N,d)
-        E = torch.einsum("nk,bkd->bnd", M.to(device), g)  # (B, N, d)
+        E = torch.einsum("nk,bk d->bnd", M.to(device), g)  # (B, N, d)
         # L2 normalize embeddings
         E = E / (E.norm(dim=-1, keepdim=True).clamp_min(self.eps))
 

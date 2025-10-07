@@ -15,3 +15,12 @@ RelateWorks/
 gradcam*/
 debug
 bad_sample/
+*DEFACTO*
+*COVERAGE*/
+COVERAGE
+ablationTImg/
+A2/
+overlay_results/
+inside/
+visual/
+cp/
